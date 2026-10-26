@@ -7,6 +7,8 @@ requires-python = ">=3.11"
 dependencies = [
     "arxiv>=4.0.1",
     "beautifulsoup4>=4.15.0",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.1",
     "langchain-classic>=1.0.8",
     "langchain-community>=0.4.2",
     "langchain-core>=1.7.0",
@@ -18,7 +20,9 @@ dependencies = [
     "pydantic>=2.14.1",
     "pymupdf>=2.0",
     "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.32",
     "qdrant-client>=1.20.0",
     "streamlit>=1.66.1",
     "tavily-python>=0.8.5",
+    "uvicorn[standard]>=0.30.0",
 ]

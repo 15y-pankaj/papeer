@@ -1,197 +1,86 @@
-import json
-import tempfile
-import uuid
-from datetime import datetime
-from pathlib import Path
+import mimetypes
 
 import streamlit as st
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from dotenv import load_dotenv
 
+from backend.api_client import APIClientError, PapeerAPIClient
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-
-from backend.btw_handler import handle_btw
-
-from backend.paper_loader import load_arxiv, load_document, load_webpage
-
-from backend.rag_graph import build_graph
-
-from backend.vector_store import add_paper, list_papers
+load_dotenv()
 
 st.set_page_config(page_title="Papeer", page_icon="📚", layout="centered")
 
 
 @st.cache_resource
-def get_graph():
-    return build_graph()
+def get_api_client() -> PapeerAPIClient:
+    return PapeerAPIClient()
 
 
-SESSIONS_FILE = Path("sessions.json")
-_rename_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
-
-
-def load_sessions() -> dict:
-    try:
-        return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_sessions(sessions_meta: dict) -> None:
-    SESSIONS_FILE.write_text(json.dumps(sessions_meta, indent=2), encoding="utf-8")
-
-
-def _serialize_state(values: dict) -> dict:
-    out = {}
-    for k, v in values.items():
-        if k == "messages":
-            out[k] = [
-                {
-                    "type": type(m).__name__,
-                    "content": (
-                        m.content[:300]
-                        if isinstance(m.content, str)
-                        else repr(m.content)[:300]
-                    ),
-                }
-                for m in (v or [])
-            ]
-        elif k == "retrieved_docs":
-            out[k] = [
-                {"content": d.page_content[:300], "metadata": d.metadata}
-                for d in (v or [])
-            ]
-        else:
-            out[k] = v
-    return out
-
-
-def _content_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-
-    text_parts = []
-    for block in content:
-        if isinstance(block, str):
-            text_parts.append(block)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            text = block.get("text")
-            if isinstance(text, str):
-                text_parts.append(text)
-    return "".join(text_parts)
-
-
-def generate_session_name(first_message: str) -> str:
-    try:
-        response = _rename_llm.invoke(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Generate a concise 3-5 word title for a research chat session "
-                        "based on the user's first message. Return only the title, "
-                        "no punctuation at the end, no quotes."
-                    ),
-                },
-                {"role": "user", "content": first_message[:500]},
-            ]
-        )
-        return response.content.strip()
-    except Exception:
-        return "New Session"
-
-
-def maybe_rename_session(session_id: str, first_message: str) -> None:
-    if st.session_state.sessions_meta.get(session_id, {}).get("is_named"):
-        return
-    name = generate_session_name(first_message)
-    st.session_state.sessions_meta[session_id]["name"] = name
-    st.session_state.sessions_meta[session_id]["is_named"] = True
-    save_sessions(st.session_state.sessions_meta)
-
-
-def create_session() -> str:
-    sid = str(uuid.uuid4())
-    st.session_state.sessions_meta[sid] = {
-        "id": sid,
-        "name": "New Session",
-        "created_at": datetime.utcnow().isoformat(),
-        "is_named": False,
-    }
-    save_sessions(st.session_state.sessions_meta)
+def create_session(api: PapeerAPIClient) -> str:
+    session = api.create_session()
+    sid = session["id"]
+    st.session_state.sessions_meta[sid] = session
     st.session_state.chats[sid] = []
     st.session_state.turns[sid] = 0
     return sid
 
-def load_session_chats(session_id: str) -> list[dict]:
-    config = {"configurable": {"thread_id": session_id}}
+
+def load_session_chats(api: PapeerAPIClient, session_id: str) -> list[dict]:
     try:
-        state = graph.get_state(config)
-        if not state or not state.values:
-            return []
-        chats = []
-        turn = 0
-        turn_has_user_message = False
-        for msg in state.values.get("messages", []):
-            if isinstance(msg, HumanMessage):
-                if not turn_has_user_message:
-                    turn += 1
-                    chats.append({"role": "user", "content": _content_text(msg.content)})
-                    turn_has_user_message = True
-            elif isinstance(msg, (AIMessage, AIMessageChunk)) and not getattr(msg, "tool_calls", []):
-                content = _content_text(msg.content)
-                if turn_has_user_message and content:
-                    chats.append(
-                        {
-                            "role": "assistant",
-                            "content": content,
-                            "turn": turn,
-                            "graph_state": {},
-                        }
-                    )
-                    turn_has_user_message = False
-        return chats
+        return api.get_history(session_id)
     except Exception as exc:
         st.error(f"Could not restore chat history for this session: {exc}")
         return []
 
-def switch_session(session_id: str) -> None:
+
+def switch_session(api: PapeerAPIClient, session_id: str) -> None:
     st.session_state.active_session_id = session_id
     if session_id not in st.session_state.chats:
-        st.session_state.chats[session_id] = load_session_chats(session_id)
+        st.session_state.chats[session_id] = load_session_chats(api, session_id)
     if session_id not in st.session_state.turns:
         turn_count = sum(1 for m in st.session_state.chats[session_id] if m["role"] == "assistant")
         st.session_state.turns[session_id] = turn_count
 
 
-graph = get_graph()
+api = get_api_client()
 
 # ── Bootstrap ──────────────────────────────────────────────────────────────────
-if "sessions_meta" not in st.session_state:
-    st.session_state.sessions_meta = load_sessions()
+try:
+    sessions = api.list_sessions()
+    st.session_state.sessions_meta = {session["id"]: session for session in sessions}
+except APIClientError as exc:
+    st.error(f"Papeer API unavailable: {exc}")
+    st.session_state.sessions_meta = st.session_state.get("sessions_meta", {})
 if "chats" not in st.session_state:
     st.session_state.chats = {}
 if "turns" not in st.session_state:
     st.session_state.turns = {}
-if "active_session_id" not in st.session_state:
+if (
+    "active_session_id" not in st.session_state
+    or st.session_state.active_session_id not in st.session_state.sessions_meta
+):
     if st.session_state.sessions_meta:
         latest = max(
             st.session_state.sessions_meta.values(),
             key=lambda s: s["created_at"],
         )
-        switch_session(latest["id"])
+        switch_session(api, latest["id"])
     else:
-        sid = create_session()
-        st.session_state.active_session_id = sid
+        try:
+            st.session_state.active_session_id = create_session(api)
+        except APIClientError as exc:
+            st.error(f"Could not create a session: {exc}")
+            st.stop()
 
 active_sid = st.session_state.active_session_id
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     if st.button("+ New Chat", use_container_width=True):
-        new_sid = create_session()
+        try:
+            new_sid = create_session(api)
+        except APIClientError as exc:
+            st.error(f"Could not create a session: {exc}")
+            st.stop()
         st.session_state.active_session_id = new_sid
         active_sid = new_sid
         st.rerun()
@@ -214,7 +103,7 @@ with st.sidebar:
             type=btn_type,
         ):
             if not is_active:
-                switch_session(sid)
+                switch_session(api, sid)
                 st.rerun()
 
     st.divider()
@@ -231,31 +120,43 @@ with st.sidebar:
     )
     if st.button("Add Files", use_container_width=True, key="btn_add_files"):
         if uploaded_files:
+            if len(uploaded_files) > 5:
+                st.error("Upload no more than five files at a time.")
+                st.stop()
             processed_key = f"processed_files_{active_sid}"
             if processed_key not in st.session_state:
                 st.session_state[processed_key] = set()
             with st.spinner("Processing files…"):
+                files_to_upload = [
+                    f for f in uploaded_files
+                    if f.name not in st.session_state[processed_key]
+                ]
                 for f in uploaded_files:
                     if f.name in st.session_state[processed_key]:
                         st.info(f"Already loaded: {f.name}")
-                        continue
-                    suffix = Path(f.name).suffix
-                    tmp_path = None
+                if not files_to_upload:
+                    st.info("All selected files have already been loaded.")
+                else:
                     try:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                            tmp.write(f.read())
-                            tmp_path = tmp.name
-                        docs = load_document(tmp_path)
-                        for doc in docs:
-                            doc.metadata["title"] = Path(f.name).stem
-                        add_paper(docs, active_sid)
-                        st.session_state[processed_key].add(f.name)
-                        st.success(f"Added: {f.name}")
-                    except Exception as e:
-                        st.error(f"Failed: {f.name} — {e}")
-                    finally:
-                        if tmp_path:
-                            Path(tmp_path).unlink(missing_ok=True)
+                        results = api.upload_documents(
+                            active_sid,
+                            [
+                                (
+                                    f.name,
+                                    f.getvalue(),
+                                    f.type or mimetypes.guess_type(f.name)[0] or "application/octet-stream",
+                                )
+                                for f in files_to_upload
+                            ],
+                        )
+                        for result in results:
+                            if result["ok"]:
+                                st.session_state[processed_key].add(result["filename"])
+                                st.success(f"Added: {result['filename']}")
+                            else:
+                                st.error(f"Failed: {result['filename']} — {result['error']}")
+                    except APIClientError as exc:
+                        st.error(f"File upload failed: {exc}")
             st.rerun()
 
         else:
@@ -273,14 +174,19 @@ with st.sidebar:
     if st.button("Load URLs", use_container_width=True, key="btn_load_urls"):
         urls = [u.strip() for u in url_input.splitlines() if u.strip()]
         if urls:
+            if len(urls) > 5:
+                st.error("Load no more than five URLs at a time.")
+                st.stop()
             with st.spinner("Loading web pages…"):
-                for url in urls:
-                    try:
-                        docs = load_webpage(url)
-                        add_paper(docs, active_sid)
-                        st.success(f"Loaded: {url[:60]}")
-                    except Exception as e:
-                        st.error(f"Failed: {url[:60]} — {e}")
+                try:
+                    results = api.load_urls(active_sid, urls)
+                    for result in results:
+                        if result["ok"]:
+                            st.success(f"Loaded: {result['url'][:60]}")
+                        else:
+                            st.error(f"Failed: {result['url'][:60]} — {result['error']}")
+                except APIClientError as exc:
+                    st.error(f"URL loading failed: {exc}")
             st.rerun()
         else:
             st.warning("Enter at least one URL.")
@@ -297,12 +203,10 @@ with st.sidebar:
         if arxiv_title.strip():
             with st.spinner("Loading from ArXiv…"):
                 try:
-                    docs = load_arxiv(arxiv_title.strip())
-                    add_paper(docs, active_sid)
-                    loaded_title = docs[0].metadata.get("title") if docs else arxiv_title.strip()
-                    st.success(f"Loaded: {loaded_title}")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                    result = api.load_arxiv(active_sid, arxiv_title.strip())
+                    st.success(f"Loaded: {result['title']}")
+                except APIClientError as exc:
+                    st.error(f"ArXiv loading failed: {exc}")
             st.rerun()
         else:
             st.warning("Enter a paper title or ArXiv ID.")
@@ -311,15 +215,14 @@ with st.sidebar:
     st.divider()
     st.markdown("### Loaded Documents")
     try:
-        doc_titles = list_papers(active_sid)
-    except Exception:
+        doc_titles = api.list_documents(active_sid)
+    except APIClientError as exc:
         doc_titles = None
-    if doc_titles is None:
-        st.caption("Could not load document list — try refreshing.")
-    elif doc_titles:
+        st.caption(f"Could not load document list: {exc}")
+    if doc_titles:
         for title in doc_titles:
             st.markdown(f"- {title}")
-    else:
+    elif doc_titles == []:
         st.caption("No documents loaded yet.")
 
 
@@ -362,12 +265,17 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
             else:
                 placeholder = st.empty()
                 response_text = ""
-                for chunk in handle_btw(query):
-                    response_text += chunk
-                    placeholder.markdown(response_text + "▌")
-                placeholder.markdown(response_text)
+                try:
+                    for event in api.btw_stream(query):
+                        if event["event"] == "token":
+                            response_text += event["data"].get("text", "")
+                            placeholder.markdown(response_text + "▌")
+                        elif event["event"] == "error":
+                            raise APIClientError(502, event["data"].get("detail", "API error"))
+                    placeholder.markdown(response_text or "No response generated.")
+                except APIClientError as exc:
+                    st.error(f"/btw request failed: {exc}")
             st.caption("Side channel — not saved to session history.")
-
 
     else:
         if active_sid not in st.session_state.chats:
@@ -375,71 +283,45 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
         if active_sid not in st.session_state.turns:
             st.session_state.turns[active_sid] = 0
 
-        is_first_message = len(st.session_state.chats[active_sid]) == 0
-
         with st.chat_message("user"):
             st.markdown(prompt)
         st.session_state.chats[active_sid].append({"role": "user", "content": prompt})
         st.session_state.turns[active_sid] += 1
         current_turn = st.session_state.turns[active_sid]
 
-        if is_first_message:
-            maybe_rename_session(active_sid, prompt)
-
-        input_state = {
-            "messages": [HumanMessage(content=prompt)],
-            "session_id": active_sid,
-            "query": prompt,
-            "route": None,
-            "retrieved_docs": [],
-            "retrieval_attempts": 0,
-            "claim_verdict": None,
-            "claim_source": None,
-            "superseding_papers": [],
-            "answer": None,
-            "is_relevant": None,
-            "rewrite_count": 0,
-        }
-        config = {"configurable": {"thread_id": active_sid}}
-
         with st.chat_message("assistant"):
             placeholder = st.empty()
             response_text = ""
-
-            for chunk, metadata in graph.stream(input_state, config, stream_mode="messages"):
-                if (
-                    metadata.get("langgraph_node") == "generate_answer"
-                    and hasattr(chunk, "content")
-                    and chunk.content
-                ):
-                    text = _content_text(chunk.content)
-                    if text:
-                        response_text += text
+            state_snapshot = {}
+            completed = False
+            try:
+                for event in api.chat_stream(active_sid, prompt):
+                    if event["event"] == "token":
+                        response_text += event["data"].get("text", "")
                         placeholder.markdown(response_text + "▌")
+                    elif event["event"] == "done":
+                        response_text = event["data"].get("answer") or response_text
+                        state_snapshot = event["data"].get("graph_state", {})
+                        completed = True
+                    elif event["event"] == "error":
+                        raise APIClientError(
+                            502,
+                            event["data"].get("detail", "Chat request failed."),
+                        )
+                if not completed:
+                    raise APIClientError(502, "The API stream ended before completion.")
+                placeholder.markdown(response_text or "No response generated.")
+            except APIClientError as exc:
+                st.error(f"Chat request failed: {exc}")
 
-            if not response_text:
-                final_values = graph.get_state(config).values
-                response_text = (
-                    _content_text(final_values.get("answer"))
-                    or "No response generated."
+            if completed:
+                with st.expander(f"📊 Graph state · turn {current_turn}", expanded=False):
+                    st.json(state_snapshot)
+                st.session_state.chats[active_sid].append(
+                    {
+                        "role": "assistant",
+                        "content": response_text or "No response generated.",
+                        "graph_state": state_snapshot,
+                        "turn": current_turn,
+                    }
                 )
-
-            placeholder.markdown(response_text)
-
-            final_values = graph.get_state(config).values
-            state_snapshot = _serialize_state(final_values)
-
-            with st.expander(f"📊 Graph state · turn {current_turn}", expanded=False):
-                st.json(state_snapshot)
-
-        st.session_state.chats[active_sid].append(
-            {
-                "role": "assistant",
-                "content": response_text,
-                "graph_state": state_snapshot,
-                "turn": current_turn,
-            }
-        )
-
-        if is_first_message:
-            st.rerun()

@@ -9,3 +9,11 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3*
+sessions.json
+embedding_cache/
