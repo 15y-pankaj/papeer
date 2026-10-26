@@ -7,9 +7,29 @@ import httpx
 
 
 class APIClientError(RuntimeError):
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        detail: str,
+        code: str | None = None,
+    ) -> None:
         super().__init__(detail)
         self.status_code = status_code
+        self.code = code
+
+    @property
+    def user_message(self) -> str:
+        if self.code == "credits_exhausted":
+            return (
+                "API credits or quota are exhausted. Please wait for the quota "
+                "to reset/refill, or check your provider account."
+            )
+        if self.code == "rate_limited":
+            return (
+                "The provider is receiving too many requests. Please wait briefly "
+                "and try again."
+            )
+        return str(self)
 
 
 class PapeerAPIClient:
@@ -28,11 +48,7 @@ class PapeerAPIClient:
         except httpx.HTTPError as exc:
             raise APIClientError(0, f"Could not connect to the Papeer API: {exc}") from exc
         if response.is_error:
-            try:
-                detail = response.json().get("detail", response.text)
-            except (ValueError, AttributeError):
-                detail = response.text
-            raise APIClientError(response.status_code, str(detail))
+            raise self._response_error(response)
         if response.status_code == 204:
             return None
         return response.json()
@@ -53,11 +69,7 @@ class PapeerAPIClient:
                 headers={"Accept": "text/event-stream"},
             ) as response:
                 if response.is_error:
-                    try:
-                        detail = response.json().get("detail", response.text)
-                    except (ValueError, AttributeError):
-                        detail = response.text
-                    raise APIClientError(response.status_code, str(detail))
+                    raise self._response_error(response)
 
                 event_name = "message"
                 data_lines: list[str] = []
@@ -88,6 +100,20 @@ class PapeerAPIClient:
             raise
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             raise APIClientError(0, f"The API stream failed: {exc}") from exc
+
+    @staticmethod
+    def _response_error(response: httpx.Response) -> APIClientError:
+        try:
+            detail = response.json().get("detail", response.text)
+        except (ValueError, AttributeError):
+            detail = response.text
+        if isinstance(detail, dict):
+            return APIClientError(
+                response.status_code,
+                str(detail.get("detail", detail.get("message", "API request failed."))),
+                code=detail.get("code"),
+            )
+        return APIClientError(response.status_code, str(detail))
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return self.get("/api/sessions")

@@ -15,6 +15,20 @@ def get_api_client() -> PapeerAPIClient:
     return PapeerAPIClient()
 
 
+def _provider_error_message(code: str | None, fallback: str) -> str:
+    if code == "credits_exhausted":
+        return (
+            "API credits or quota are exhausted. Please wait for the quota "
+            "to reset/refill, or check your provider account."
+        )
+    if code == "rate_limited":
+        return (
+            "The provider is receiving too many requests. Please wait briefly "
+            "and try again."
+        )
+    return fallback
+
+
 def create_session(api: PapeerAPIClient) -> str:
     session = api.create_session()
     sid = session["id"]
@@ -154,9 +168,12 @@ with st.sidebar:
                                 st.session_state[processed_key].add(result["filename"])
                                 st.success(f"Added: {result['filename']}")
                             else:
-                                st.error(f"Failed: {result['filename']} — {result['error']}")
+                                    st.error(
+                                        f"Failed: {result['filename']} — "
+                                        f"{_provider_error_message(result.get('error_code'), result['error'])}"
+                                    )
                     except APIClientError as exc:
-                        st.error(f"File upload failed: {exc}")
+                        st.error(f"File upload failed: {exc.user_message}")
             st.rerun()
 
         else:
@@ -184,9 +201,12 @@ with st.sidebar:
                         if result["ok"]:
                             st.success(f"Loaded: {result['url'][:60]}")
                         else:
-                            st.error(f"Failed: {result['url'][:60]} — {result['error']}")
+                            st.error(
+                                f"Failed: {result['url'][:60]} — "
+                                f"{_provider_error_message(result.get('error_code'), result['error'])}"
+                            )
                 except APIClientError as exc:
-                    st.error(f"URL loading failed: {exc}")
+                    st.error(f"URL loading failed: {exc.user_message}")
             st.rerun()
         else:
             st.warning("Enter at least one URL.")
@@ -206,7 +226,7 @@ with st.sidebar:
                     result = api.load_arxiv(active_sid, arxiv_title.strip())
                     st.success(f"Loaded: {result['title']}")
                 except APIClientError as exc:
-                    st.error(f"ArXiv loading failed: {exc}")
+                    st.error(f"ArXiv loading failed: {exc.user_message}")
             st.rerun()
         else:
             st.warning("Enter a paper title or ArXiv ID.")
@@ -218,7 +238,7 @@ with st.sidebar:
         doc_titles = api.list_documents(active_sid)
     except APIClientError as exc:
         doc_titles = None
-        st.caption(f"Could not load document list: {exc}")
+        st.caption(f"Could not load document list: {exc.user_message}")
     if doc_titles:
         for title in doc_titles:
             st.markdown(f"- {title}")
@@ -271,10 +291,15 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
                             response_text += event["data"].get("text", "")
                             placeholder.markdown(response_text + "▌")
                         elif event["event"] == "error":
-                            raise APIClientError(502, event["data"].get("detail", "API error"))
+                            error = event["data"]
+                            raise APIClientError(
+                                502,
+                                error.get("detail", "API error"),
+                                code=error.get("code"),
+                            )
                     placeholder.markdown(response_text or "No response generated.")
                 except APIClientError as exc:
-                    st.error(f"/btw request failed: {exc}")
+                    st.error(f"/btw request failed: {exc.user_message}")
             st.caption("Side channel — not saved to session history.")
 
     else:
@@ -304,15 +329,17 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
                         state_snapshot = event["data"].get("graph_state", {})
                         completed = True
                     elif event["event"] == "error":
+                        error = event["data"]
                         raise APIClientError(
                             502,
-                            event["data"].get("detail", "Chat request failed."),
+                            error.get("detail", "Chat request failed."),
+                            code=error.get("code"),
                         )
                 if not completed:
                     raise APIClientError(502, "The API stream ended before completion.")
                 placeholder.markdown(response_text or "No response generated.")
             except APIClientError as exc:
-                st.error(f"Chat request failed: {exc}")
+                st.error(f"Chat request failed: {exc.user_message}")
 
             if completed:
                 with st.expander(f"📊 Graph state · turn {current_turn}", expanded=False):

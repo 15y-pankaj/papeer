@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from pydantic import AnyHttpUrl, BaseModel, Field
 
 from backend.btw_handler import handle_btw
+from backend.provider_errors import provider_error_payload, provider_http_detail, provider_result_error
 
 logger = logging.getLogger(__name__)
 
@@ -390,9 +391,9 @@ def _chat_events(session_id: str, query: str):
                 "graph_state": _serialize_state(final_values),
             },
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Chat pipeline failed for session %s", session_id)
-        yield _sse("error", {"detail": "The chat request failed. Check API logs."})
+        yield _sse("error", provider_error_payload(exc))
 
 
 @app.post("/api/sessions/{session_id}/chat")
@@ -417,9 +418,9 @@ def _btw_events(query: str):
         for text in handle_btw(query):
             yield _sse("token", {"text": text})
         yield _sse("done", {})
-    except Exception:
+    except Exception as exc:
         logger.exception("Side-channel request failed")
-        yield _sse("error", {"detail": "The /btw request failed. Check API logs."})
+        yield _sse("error", provider_error_payload(exc))
 
 
 @app.post("/api/btw")
@@ -479,9 +480,7 @@ def upload_documents(
             raise
         except Exception as exc:
             logger.exception("Could not ingest uploaded file %s", filename)
-            results.append(
-                {"filename": filename, "ok": False, "error": "Document ingestion failed."}
-            )
+            results.append({"filename": filename, "ok": False, **provider_result_error(exc)})
         finally:
             upload.file.close()
             if temp_path:
@@ -502,9 +501,9 @@ def load_urls(session_id: str, request: UrlLoadRequest) -> dict[str, Any]:
             documents = load_webpage(url)
             add_paper(documents, session_id)
             results.append({"url": url, "ok": True, "chunks": len(documents)})
-        except Exception:
+        except Exception as exc:
             logger.exception("Could not ingest URL %s", url)
-            results.append({"url": url, "ok": False, "error": "URL ingestion failed."})
+            results.append({"url": url, "ok": False, **provider_result_error(exc)})
     return {"results": results}
 
 
@@ -521,7 +520,10 @@ def load_arxiv(session_id: str, request: ArxivLoadRequest) -> dict[str, Any]:
         add_paper(documents, session_id)
     except Exception as exc:
         logger.exception("Could not ingest ArXiv query")
-        raise HTTPException(status_code=502, detail="ArXiv document ingestion failed.") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=provider_http_detail(exc),
+        ) from exc
     title = (
         documents[0].metadata.get("title", request.query.strip())
         if documents

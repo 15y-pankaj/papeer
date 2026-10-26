@@ -30,6 +30,9 @@ Graph checkpoints remain in `checkpoints.db`.
 
 The API exposes OpenAPI documentation at `http://127.0.0.1:8000/docs`, a
 liveness check at `/api/health`, and a dependency readiness check at `/api/ready`.
+When a provider explicitly reports exhausted credits/quota, the API returns a
+safe error code and the Streamlit UI asks the user to wait for the quota refill.
+Transient HTTP 429 rate limits are reported separately.
 
 ## Security and deployment
 
