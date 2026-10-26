@@ -1,8 +1,14 @@
 {
-  "f9bf9d8e-2e75-4d38-af0c-a41602e65897": {
-    "id": "f9bf9d8e-2e75-4d38-af0c-a41602e65897",
+  "5641e5f9-dcad-4e63-b9c3-5f6645654321": {
+    "id": "5641e5f9-dcad-4e63-b9c3-5f6645654321",
     "name": "New Session",
-    "created_at": "2026-10-25T18:53:15.601092",
+    "created_at": "2026-10-26T09:40:44.025089",
     "is_named": true
+  },
+  "930c23d2-e18d-4515-9b12-25847525fcc7": {
+    "id": "930c23d2-e18d-4515-9b12-25847525fcc7",
+    "name": "New Session",
+    "created_at": "2026-10-26T09:42:40.052613",
+    "is_named": false
   }
 }
