@@ -33,6 +33,7 @@ embeddings = CacheBackedEmbeddings.from_bytes_store(
 qdrant_client = QdrantClient(
     url=os.environ["QDRANT_URL"],
     api_key=os.environ["QDRANT_API_KEY"],
+    timeout=120,
 )
 
 

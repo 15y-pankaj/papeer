@@ -1,4 +1,5 @@
 from pathlib import Path
+import tempfile
 
 import re
 import urllib.parse
@@ -43,7 +44,7 @@ def load_markdown(file_path: str) -> list[Document]:
 
 
 def load_webpage(url: str) -> list[Document]:
-    docs = WebBaseLoader(url).load()
+    docs = WebBaseLoader(url , requests_kwargs={"timeout": 30}).load()
     title = (docs[0].metadata.get("title") or url) if docs else url
     return _stamp_title(_splitter.split_documents(docs), title)
 
@@ -74,17 +75,28 @@ def _arxiv_search(query: str) -> str:
         xml = resp.read().decode()
     m = re.search(r"<id>https?://arxiv\.org/abs/(\d{4}\.\d{4,5}(?:v\d+)?)</id>", xml)
     if not m:
-        raise ValueError(f"No ArXiv paper found for: {query!r}")
+        raise ValueError(f"No ArXiv paper found for: {query}")
     return re.sub(r"v\d+$", "", m.group(1))
 
 
 def _load_arxiv_by_id(arxiv_id: str) -> list[Document]:
     """Download and chunk an ArXiv paper PDF by its bare ID."""
-    docs = PyMuPDFLoader(f"https://arxiv.org/pdf/{arxiv_id}").load()
-    if not docs:
-        raise ValueError(f"Could not load PDF for ArXiv ID: {arxiv_id}")
-    title = (docs[0].metadata.get("title") or "").strip() or _arxiv_api_lookup(arxiv_id)
-    return _stamp_title(_splitter.split_documents(docs), title)
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+    with urllib.request.urlopen(pdf_url, timeout=60) as resp:
+        pdf_bytes = resp.read()
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+        docs = PyMuPDFLoader(tmp_path).load()
+        if not docs:
+            raise ValueError(f"Could not load PDF for ArXiv ID: {arxiv_id}")
+        title = (docs[0].metadata.get("title") or "").strip() or _arxiv_api_lookup(arxiv_id)
+        return _stamp_title(_splitter.split_documents(docs), title)
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
 
 
 def load_arxiv(query: str) -> list[Document]:
@@ -103,4 +115,4 @@ def load_document(source: str) -> list[Document]:
         return load_text(source)
     if ext in (".md", ".markdown"):
         return load_markdown(source)
-    raise ValueError(f"Unsupported file type: {ext!r}")
+    raise ValueError(f"Unsupported file type: {ext}")
