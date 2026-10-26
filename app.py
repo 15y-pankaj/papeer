@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -66,6 +66,23 @@ def _serialize_state(values: dict) -> dict:
     return out
 
 
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    text_parts = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "".join(text_parts)
+
+
 def generate_session_name(first_message: str) -> str:
     try:
         response = _rename_llm.invoke(
@@ -116,16 +133,28 @@ def load_session_chats(session_id: str) -> list[dict]:
             return []
         chats = []
         turn = 0
+        turn_has_user_message = False
         for msg in state.values.get("messages", []):
-            type_name = type(msg).__name__
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            if type_name == "HumanMessage":
-                chats.append({"role": "user", "content": content})
-            elif type_name in ("AIMessage", "AIMessageChunk"):
-                turn += 1
-                chats.append({"role": "assistant", "content": content, "turn": turn, "graph_state": {}})
+            if isinstance(msg, HumanMessage):
+                if not turn_has_user_message:
+                    turn += 1
+                    chats.append({"role": "user", "content": _content_text(msg.content)})
+                    turn_has_user_message = True
+            elif isinstance(msg, (AIMessage, AIMessageChunk)) and not getattr(msg, "tool_calls", []):
+                content = _content_text(msg.content)
+                if turn_has_user_message and content:
+                    chats.append(
+                        {
+                            "role": "assistant",
+                            "content": content,
+                            "turn": turn,
+                            "graph_state": {},
+                        }
+                    )
+                    turn_has_user_message = False
         return chats
-    except Exception:
+    except Exception as exc:
+        st.error(f"Could not restore chat history for this session: {exc}")
         return []
 
 def switch_session(session_id: str) -> None:
@@ -303,7 +332,7 @@ st.markdown(
     "🔍 **Ask questions** from your uploaded papers &nbsp;·&nbsp; "
     "✅ **Verify claims** against recent literature &nbsp;·&nbsp; "
     "🌐 **Search the web** for the latest findings\n\n"
-    "> Upload papers in the sidebar *(coming soon)* and start chatting below."
+    "> Upload papers in the sidebar and start chatting below."
 )
 st.divider()
 
@@ -377,35 +406,40 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
             placeholder = st.empty()
             response_text = ""
 
-        for chunk, metadata in graph.stream(input_state, config, stream_mode="messages"):
+            for chunk, metadata in graph.stream(input_state, config, stream_mode="messages"):
                 if (
                     metadata.get("langgraph_node") == "generate_answer"
                     and hasattr(chunk, "content")
                     and chunk.content
                 ):
-                    response_text += chunk.content
-                    placeholder.markdown(response_text + "▌")
+                    text = _content_text(chunk.content)
+                    if text:
+                        response_text += text
+                        placeholder.markdown(response_text + "▌")
 
-    if not response_text:
+            if not response_text:
                 final_values = graph.get_state(config).values
-                response_text = final_values.get("answer") or "No response generated."
+                response_text = (
+                    _content_text(final_values.get("answer"))
+                    or "No response generated."
+                )
 
-    placeholder.markdown(response_text)
+            placeholder.markdown(response_text)
 
-    final_values = graph.get_state(config).values
-    state_snapshot = _serialize_state(final_values)
+            final_values = graph.get_state(config).values
+            state_snapshot = _serialize_state(final_values)
 
-    with st.expander(f"📊 Graph state · turn {current_turn}", expanded=False):
-        st.json(state_snapshot)
+            with st.expander(f"📊 Graph state · turn {current_turn}", expanded=False):
+                st.json(state_snapshot)
 
-st.session_state.chats[active_sid].append(
-     {
-          "role": "assistant",
-          "content": response_text,
-          "graph_state": state_snapshot,
-          "turn": current_turn,
-      }
-  )
+        st.session_state.chats[active_sid].append(
+            {
+                "role": "assistant",
+                "content": response_text,
+                "graph_state": state_snapshot,
+                "turn": current_turn,
+            }
+        )
 
-if is_first_message:
-     st.rerun()
+        if is_first_message:
+            st.rerun()

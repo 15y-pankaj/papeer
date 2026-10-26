@@ -13,6 +13,23 @@ load_dotenv()
 llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
 
 
+def _text_from_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    text_parts = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "".join(text_parts)
+
+
 def handle_btw(query: str) -> Generator[str, None, None]:
     """Off-topic side channel — never touches the vector store or checkpointer."""
     route_prompt = ChatPromptTemplate.from_messages([
@@ -42,5 +59,6 @@ def handle_btw(query: str) -> Generator[str, None, None]:
         ])
 
     for chunk in (answer_prompt | llm).stream({"query": query}):
-        if chunk.content:
-            yield chunk.content
+        text = _text_from_content(chunk.content)
+        if text:
+            yield text
